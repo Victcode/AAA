@@ -105,7 +105,7 @@ class LoRAIPAttnProcessor(nn.Module):
     """
 
     def __init__(self, hidden_size, cross_attention_dim=None, rank=4, network_alpha=None, lora_scale=1.0,
-                       scale_faceid=1.0, scale_normal=1.0, num_tokens_faceid=4, num_tokens_normal=16):
+                       scale_faceid=1.0, scale_general=1.0, num_tokens_faceid=4, num_tokens_general=16):
         super().__init__()
 
         self.rank = rank
@@ -120,16 +120,16 @@ class LoRAIPAttnProcessor(nn.Module):
         self.cross_attention_dim = cross_attention_dim
         
         self.scale_faceid = scale_faceid
-        self.scale_normal = scale_normal
+        self.scale_general = scale_general
         
         self.num_tokens_faceid = num_tokens_faceid
-        self.num_tokens_normal = num_tokens_normal
+        self.num_tokens_general = num_tokens_general
 
         self.to_k_ip_faceid = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         self.to_v_ip_faceid = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         
-        self.to_k_ip_normal = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
-        self.to_v_ip_normal = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
+        self.to_k_ip_general = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
+        self.to_v_ip_general = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
 
     def __call__(
         self,
@@ -164,12 +164,12 @@ class LoRAIPAttnProcessor(nn.Module):
             encoder_hidden_states = hidden_states
         else:
             # get encoder_hidden_states, ip_hidden_states
-            end_pos_faceid, end_pos_normal = encoder_hidden_states.shape[1] - (self.num_tokens_faceid + self.num_tokens_normal), \
-                                             encoder_hidden_states.shape[1] - self.num_tokens_normal
-            encoder_hidden_states, ip_hidden_states_faceid, ip_hidden_states_normal = (
+            end_pos_faceid, end_pos_general = encoder_hidden_states.shape[1] - (self.num_tokens_faceid + self.num_tokens_general), \
+                                             encoder_hidden_states.shape[1] - self.num_tokens_general
+            encoder_hidden_states, ip_hidden_states_faceid, ip_hidden_states_general = (
                 encoder_hidden_states[:, :end_pos_faceid, :],
-                encoder_hidden_states[:, end_pos_faceid:end_pos_normal, :],
-                encoder_hidden_states[:, end_pos_normal:, :],
+                encoder_hidden_states[:, end_pos_faceid:end_pos_general, :],
+                encoder_hidden_states[:, end_pos_general:, :],
             )
             if attn.norm_cross:
                 encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
@@ -186,8 +186,8 @@ class LoRAIPAttnProcessor(nn.Module):
         hidden_states = attn.batch_to_head_dim(hidden_states)
 
         # for ip-adapter-faceid
-        ip_key_faceid = self.to_k_ip(ip_hidden_states_faceid)
-        ip_value_faceid = self.to_v_ip(ip_hidden_states_faceid)
+        ip_key_faceid = self.to_k_ip_faceid(ip_hidden_states_faceid)
+        ip_value_faceid = self.to_v_ip_faceid(ip_hidden_states_faceid)
 
         ip_key_faceid = attn.head_to_batch_dim(ip_key_faceid)
         ip_value_faceid = attn.head_to_batch_dim(ip_value_faceid)
@@ -198,19 +198,19 @@ class LoRAIPAttnProcessor(nn.Module):
         ip_hidden_states_faceid = attn.batch_to_head_dim(ip_hidden_states_faceid)
         
         # for ip-adapter-normal
-        ip_key_normal = self.to_k_ip(ip_hidden_states_normal)
-        ip_value_normal = self.to_v_ip(ip_hidden_states_normal)
+        ip_key_general = self.to_k_ip_normal(ip_hidden_states_general)
+        ip_value_general = self.to_v_ip_normal(ip_hidden_states_general)
 
-        ip_key_normal = attn.head_to_batch_dim(ip_key_normal)
-        ip_value_normal = attn.head_to_batch_dim(ip_value_normal)
+        ip_key_general = attn.head_to_batch_dim(ip_key_general)
+        ip_value_general = attn.head_to_batch_dim(ip_value_general)
 
-        ip_attention_probs = attn.get_attention_scores(query, ip_key_normal, None)
+        ip_attention_probs = attn.get_attention_scores(query, ip_key_general, None)
         self.attn_map = ip_attention_probs
-        ip_hidden_states_normal = torch.bmm(ip_attention_probs, ip_value_normal)
-        ip_hidden_states_normal = attn.batch_to_head_dim(ip_hidden_states_normal)
+        ip_hidden_states_general = torch.bmm(ip_attention_probs, ip_value_general)
+        ip_hidden_states_general = attn.batch_to_head_dim(ip_hidden_states_general)
 
         hidden_states = hidden_states + self.scale_faceid * ip_hidden_states_faceid + \
-                                        self.scale_normal * ip_hidden_states_normal
+                                        self.scale_general * ip_hidden_states_general
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states) + self.lora_scale * self.to_out_lora(hidden_states)

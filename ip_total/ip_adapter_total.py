@@ -85,16 +85,16 @@ class ProjPlusModel(torch.nn.Module):
         return out
 
 
-class IPAdapterFaceIDPlus:
-    def __init__(self, sd_pipe, image_encoder_path_faceid, image_encoder_path_normal, ip_ckpt, device, 
-                 lora_rank=128, num_tokens_faceid=4,  num_tokens_normal=16, torch_dtype=torch.float16):
+class IPAdapterTotal:
+    def __init__(self, sd_pipe, image_encoder_path_faceid, image_encoder_path_general, ip_ckpt, device, 
+                 lora_rank=128, num_tokens_faceid=4,  num_tokens_general=16, torch_dtype=torch.float16):
         self.device = device
         self.image_encoder_path_faceid = image_encoder_path_faceid
-        self.image_encoder_path_normal = image_encoder_path_normal
+        self.image_encoder_path_general = image_encoder_path_general
         self.ip_ckpt = ip_ckpt
         self.lora_rank = lora_rank
         self.num_tokens_faceid = num_tokens_faceid
-        self.num_tokens_normal = num_tokens_normal
+        self.num_tokens_general = num_tokens_general
         self.torch_dtype = torch_dtype
 
         self.pipe = sd_pipe.to(self.device)
@@ -104,13 +104,13 @@ class IPAdapterFaceIDPlus:
         self.image_encoder_faceid = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path_faceid).to(
             self.device, dtype=self.torch_dtype
         )
-        self.image_encoder_normal = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path_normal).to(
+        self.image_encoder_general = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path_general).to(
             self.device, dtype=self.torch_dtype
         )
         
         self.clip_image_processor = CLIPImageProcessor()
         # image proj model
-        self.image_proj_model_faceid, self.image_proj_model_normal = self.init_proj()
+        self.image_proj_model_faceid, self.image_proj_model_general = self.init_proj()
 
         self.load_ip_adapter()
 
@@ -118,22 +118,22 @@ class IPAdapterFaceIDPlus:
         image_proj_model_faceid = ProjPlusModel(
             cross_attention_dim=self.pipe.unet.config.cross_attention_dim,
             id_embeddings_dim=512,
-            clip_embeddings_dim=self.image_encoder.config.hidden_size,
+            clip_embeddings_dim=self.image_encoder_faceid.config.hidden_size,
             num_tokens=self.num_tokens_faceid,
         ).to(self.device, dtype=self.torch_dtype)
         
-        image_proj_model_normal = Resampler(
+        image_proj_model_general = Resampler(
             dim=self.pipe.unet.config.cross_attention_dim,
             depth=4,
             dim_head=64,
             heads=12,
-            num_queries=self.num_tokens_normal,
-            embedding_dim=self.image_encoder.config.hidden_size,
+            num_queries=self.num_tokens_general,
+            embedding_dim=self.image_encoder_general.config.hidden_size,
             output_dim=self.pipe.unet.config.cross_attention_dim,
             ff_mult=4,
         ).to(self.device, dtype=torch.float16)
         
-        return image_proj_model_faceid, image_proj_model_normal
+        return image_proj_model_faceid, image_proj_model_general
 
     def set_ip_adapter(self):
         unet = self.pipe.unet
@@ -155,7 +155,7 @@ class IPAdapterFaceIDPlus:
             else:
                 attn_procs[name] = LoRAIPAttnProcessor(
                     hidden_size=hidden_size, cross_attention_dim=cross_attention_dim,rank=self.lora_rank,
-                    num_tokens_faceid=self.num_tokens_faceid, num_tokens_normal=self.num_tokens_normal
+                    num_tokens_faceid=self.num_tokens_faceid, num_tokens_general=self.num_tokens_general
                 ).to(self.device, dtype=self.torch_dtype)
         unet.set_attn_processor(attn_procs)
 
@@ -163,17 +163,17 @@ class IPAdapterFaceIDPlus:
         if os.path.splitext(self.ip_ckpt)[-1] == ".safetensors":
             # Don't support this format
             state_dict = {"image_proj": {}, "ip_adapter": {}}
-            with safe_open(self.ip_ckpt, framework="pt", device="cpu") as f:
-                for key in f.keys():
-                    if key.startswith("image_proj."):
-                        state_dict["image_proj"][key.replace("image_proj.", "")] = f.get_tensor(key)
-                    elif key.startswith("ip_adapter."):
-                        state_dict["ip_adapter"][key.replace("ip_adapter.", "")] = f.get_tensor(key)
+            # with safe_open(self.ip_ckpt, framework="pt", device="cpu") as f:
+            #     for key in f.keys():
+            #         if key.startswith("image_proj."):
+            #             state_dict["image_proj"][key.replace("image_proj.", "")] = f.get_tensor(key)
+            #         elif key.startswith("ip_adapter."):
+            #             state_dict["ip_adapter"][key.replace("ip_adapter.", "")] = f.get_tensor(key)
         else:
             state_dict = torch.load(self.ip_ckpt, map_location="cpu")
             
         self.image_proj_model_faceid.load_state_dict(state_dict["image_proj_faceid"])
-        self.image_proj_model_faceid.load_state_dict(state_dict["image_proj_normal"])
+        self.image_proj_model_general.load_state_dict(state_dict["image_proj_general"])
         
         ip_layers = torch.nn.ModuleList(self.pipe.unet.attn_processors.values())
         ip_layers.load_state_dict(state_dict["ip_adapter"])
@@ -183,7 +183,7 @@ class IPAdapterFaceIDPlus:
         
         # for faceid, faceid and normal use different clip model
         if isinstance(face_image, Image.Image):
-            pil_image = [face_image]
+            face_image = [face_image]
         clip_image = self.clip_image_processor(images=face_image, return_tensors="pt").pixel_values
         clip_image = clip_image.to(self.device, dtype=self.torch_dtype)
         clip_image_embeds = self.image_encoder_faceid(clip_image, output_hidden_states=True).hidden_states[-2]
@@ -195,29 +195,29 @@ class IPAdapterFaceIDPlus:
         image_prompt_embeds_faceid = self.image_proj_model_faceid(faceid_embeds, clip_image_embeds, shortcut=shortcut, scale=s_scale)
         uncond_image_prompt_embeds_faceid = self.image_proj_model_faceid(torch.zeros_like(faceid_embeds), uncond_clip_image_embeds, shortcut=shortcut, scale=s_scale)
         
-        # for normal
-        if isinstance(pil_image, Image.Image):
-            pil_image = [pil_image]
-        clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
+        # for general
+        if isinstance(template_img, Image.Image):
+            template_img = [template_img]
+        clip_image = self.clip_image_processor(images=template_img, return_tensors="pt").pixel_values
         clip_image = clip_image.to(self.device, dtype=torch.float16)
-        clip_image_embeds = self.image_encoder_normal(clip_image, output_hidden_states=True).hidden_states[-2]
-        image_prompt_embeds_normal = self.image_proj_model_normal(clip_image_embeds)
-        uncond_clip_image_embeds = self.image_encoder_normal(
+        clip_image_embeds = self.image_encoder_general(clip_image, output_hidden_states=True).hidden_states[-2]
+        image_prompt_embeds_general = self.image_proj_model_general(clip_image_embeds)
+        uncond_clip_image_embeds = self.image_encoder_general(
             torch.zeros_like(clip_image), output_hidden_states=True
         ).hidden_states[-2]
-        uncond_image_prompt_embeds_normal = self.image_proj_model_normal(uncond_clip_image_embeds)
+        uncond_image_prompt_embeds_general = self.image_proj_model_general(uncond_clip_image_embeds)
         
         # concatenate
-        image_prompt_embeds = torch.cat([image_prompt_embeds_faceid, image_prompt_embeds_normal], dim=1)
-        uncond_image_prompt_embeds = torch.cat([uncond_image_prompt_embeds_faceid, uncond_image_prompt_embeds_normal], dim=1)
+        image_prompt_embeds = torch.cat([image_prompt_embeds_faceid, image_prompt_embeds_general], dim=1)
+        uncond_image_prompt_embeds = torch.cat([uncond_image_prompt_embeds_faceid, uncond_image_prompt_embeds_general], dim=1)
         
         return image_prompt_embeds, uncond_image_prompt_embeds
 
-    def set_scale(self, scale_faceid, scale_normal):
+    def set_scale(self, scale_faceid, scale_general):
         for attn_processor in self.pipe.unet.attn_processors.values():
             if isinstance(attn_processor, LoRAIPAttnProcessor):
                 attn_processor.scale_faceid = scale_faceid
-                attn_processor.scale_normal = scale_normal
+                attn_processor.scale_general = scale_general
 
     def generate(
         self,
@@ -227,7 +227,7 @@ class IPAdapterFaceIDPlus:
         prompt=None,
         negative_prompt=None,
         scale_faceid=1.0,
-        scale_normal=1.0,
+        scale_general=1.0,
         num_samples=4,
         seed=None,
         guidance_scale=7.5,
@@ -236,7 +236,7 @@ class IPAdapterFaceIDPlus:
         shortcut=False,
         **kwargs,
     ):
-        self.set_scale(scale_faceid, scale_normal)
+        self.set_scale(scale_faceid, scale_general)
        
         num_prompts = faceid_embeds.size(0)
 
@@ -280,5 +280,3 @@ class IPAdapterFaceIDPlus:
         ).images
 
         return images
-
-
