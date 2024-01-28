@@ -197,9 +197,9 @@ class LoRAIPAttnProcessor(nn.Module):
         ip_hidden_states_faceid = torch.bmm(ip_attention_probs, ip_value_faceid)
         ip_hidden_states_faceid = attn.batch_to_head_dim(ip_hidden_states_faceid)
         
-        # for ip-adapter-normal
-        ip_key_general = self.to_k_ip_normal(ip_hidden_states_general)
-        ip_value_general = self.to_v_ip_normal(ip_hidden_states_general)
+        # for ip-adapter-general
+        ip_key_general = self.to_k_ip_general(ip_hidden_states_general)
+        ip_value_general = self.to_v_ip_general(ip_hidden_states_general)
 
         ip_key_general = attn.head_to_batch_dim(ip_key_general)
         ip_value_general = attn.head_to_batch_dim(ip_value_general)

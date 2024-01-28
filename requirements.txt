@@ -1,1 +1,12 @@
-rmbg
+diffusers==0.22.1
+einops==0.7.0
+insightface==0.7.3
+modelscope==1.11.0
+numpy==1.24.3
+opencv_python_headless==4.9.0.80
+Pillow==10.2.0
+rembg==2.0.53
+safetensors==0.4.2
+torch==2.1.0+cu121
+tqdm==4.66.1
+transformers==4.36.2
